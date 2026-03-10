@@ -1,5 +1,5 @@
 // config/db.js
-// PostgreSQL connection pool — optimised for Supabase Transaction Pooler
+// PostgreSQL connection pool — fixed for Supabase Transaction Pooler on Render
 'use strict';
 
 require('dotenv').config();
@@ -7,24 +7,35 @@ const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max:                     10,
-  idleTimeoutMillis:       30000,
-  connectionTimeoutMillis: 15000,  // 15 seconds (was 5 — too short for Supabase pooler)
+  ssl: {
+    rejectUnauthorized: false,
+    checkServerIdentity: () => undefined,  // bypass hostname check
+  },
+  max:                     5,
+  min:                     0,             // start with 0, scale up as needed
+  idleTimeoutMillis:       20000,
+  connectionTimeoutMillis: 20000,
   allowExitOnIdle:         true,
 });
 
+// CRITICAL: handle pool-level errors so they don't crash the process
 pool.on('error', (err) => {
-  console.error('❌  Unexpected DB pool error:', err.message);
+  console.error('DB pool error (non-fatal):', err.message);
+  // do NOT rethrow — let the pool recover
 });
 
 async function query(text, params) {
-  const start = Date.now();
-  const res   = await pool.query(text, params);
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`⚡  Query (${Date.now() - start}ms): ${text.slice(0, 80)}`);
+  const start  = Date.now();
+  const client = await pool.connect();
+  try {
+    const res = await client.query(text, params);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`⚡ Query (${Date.now() - start}ms): ${text.slice(0, 80)}`);
+    }
+    return res;
+  } finally {
+    client.release();   // always release back to pool
   }
-  return res;
 }
 
 async function getClient() {
